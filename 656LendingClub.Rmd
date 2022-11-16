@@ -1,0 +1,38 @@
+---
+title: "656LendingClub"
+author: "Geo Lee"
+date: '2022-11-14'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Exploratory Data Analysis
+
+```{r}
+LoanDat = read.csv("LoanStats3a.csv")
+dim(LoanDat)
+```
+
+
+```{r}
+library(dplyr)
+LoanDatQuant <- select_if(LoanDat, is.numeric)
+LoanDatQuant <- select(LoanDatQuant, -member_id, -collections_12_mths_ex_med, -policy_code, -acc_now_delinq,-chargeoff_within_12_mths, -delinq_amnt, -pub_rec_bankruptcies, -tax_liens)
+LoanDatQuant <- LoanDatQuant[complete.cases(LoanDatQuant),]
+LoanPCA = prcomp(LoanDatQuant,scale=TRUE,center=TRUE)
+screeplot(LoanPCA,type='lines')
+```
+
+```{r}
+require(corrplot)
+corrplot(cor(LoanDatQuant), order = "hclust", tl.cex = .35)
+```
+
+```{r}
+library(ggplot2)
+ggplot(data = LoanDat, mapping = aes(x = purpose, fill=factor(loan_status))) + geom_bar()
+```
+
