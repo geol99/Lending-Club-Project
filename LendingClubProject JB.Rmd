@@ -1,0 +1,960 @@
+---
+title: "LendingClubLoanDefaultClassification"
+author: "Vikas Pulpa"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r Load Packages, include=FALSE}
+
+require(tidyverse)
+require(car)
+require(nortest)
+require(MASS)
+require(ggplot2)
+require(caret)
+require(corrplot)
+require(e1071)
+require(readr)
+require(dplyr)
+require(reshape2)
+require(skimr)
+require(stringr)
+require(rstatix)
+require(earth)
+require(vip)       # variable importance
+require(pROC) # for AUC calculations
+require(glmnet) #lasso
+
+
+
+rm(list= ls())
+```
+
+
+#### **1. Read the csv into a tibble data structure**
+
+
+```{r read csv into Tibble}
+setwd("C:/Users/Owner/Documents/TAMU Statistics/STAT 656/Project")
+lendingClubData  <- read.csv('Data/LoanStats3aCleaned.csv',sep='|')
+```
+
+#### **2. Looking at the data parsing issues and cleaning up the excel file**
+
+```{r look at the parsing issues}
+problems(lendingClubData)
+```
+
+On examining the excel sheet, we observed that the lines 39788 and 39789 were blank except that it indicates the subsequent rows indicate that loan where granted out of policy.
+
+Therefore, we edited the excel to:
+
+* Deleted those two rows 39788 and 39789 from excel.
+* Added a new feature IsLoanMeetsPolicy that takes value of 'Yes' for the loans that meet the policy (first 39786 rows) and 'No' for the ones that don't.
+
+#### **3. Read the new csv into a tibble data structure**
+
+```{r Reading the new csv into Tibble}
+lendingClubData <-  as_tibble(lendingClubData) #convert it to tibble
+```
+
+#### **4. Explore the Data **
+
+```{r Explore Lending Club Data}
+dim(lendingClubData)
+```
+
+#### **5. Data Pre-Processing **
+
+
+##### **5. a. Look at the data structures **
+
+```{r Checking data types 2}
+table(sapply(lendingClubData[1,],class))
+```
+```{r fixing data types}
+lendingClubData$term <- as.numeric(gsub(' months','',str_trim(lendingClubData$term)))
+lendingClubData$int_rate <- as.numeric(gsub('%','',lendingClubData$int_rate))
+lendingClubData$revol_util <- as.numeric(gsub('%','',lendingClubData$revol_util))
+lendingClubData$issue_d <- as.Date(lendingClubData$issue_d,format='%m/%d/%Y')
+lendingClubData$earliest_cr_line <- as.Date(lendingClubData$earliest_cr_line,format='%m/%d/%Y')
+lendingClubData$last_pymnt_d <- as.Date(lendingClubData$last_pymnt_d,format='%m/%d/%Y')
+lendingClubData$next_pymnt_d <- as.Date(lendingClubData$next_pymnt_d,format='%m/%d/%Y')
+lendingClubData$last_credit_pull_d <- as.Date(lendingClubData$last_credit_pull_d,format='%m/%d/%Y')
+
+make.true.NA <- function(x) if(is.character(x)||is.factor(x)){
+                                  is.na(x) <- x %in% c("NA", "<NA>","N/A", "n/a"); x} else {
+                                  x}
+lendingClubData[] <- lapply(lendingClubData, make.true.NA)
+```
+
+##### **5. b. Look at the missing values and perform Featurewise imputation **
+
+```{r function ggplot_missing}
+
+ggplot_missing <- function(x){
+
+	#### This function produces a plot of the missing data pattern in x.  It is a modified version of a function in the 'neato' package
+  
+  my_colors <- RColorBrewer::brewer.pal(12, "Paired")[6:7]
+  
+  x %>% 
+    is.na %>%
+    melt %>%
+    ggplot(data = ., aes(x = Var2, y = Var1)) +
+      geom_raster(aes(fill = value)) +
+      #scale_fill_brewer(name = "", labels = c("Present","Missing"), palette="Paired", direction = -1) +
+      scale_fill_manual(name = "", labels = c("Present","Missing"), values = c(my_colors[2], my_colors[1])) +
+      theme_minimal() + 
+      theme(axis.text.x  = element_text(angle=45, vjust=0.5)) + 
+      labs(x = "Variables in Dataset", y = "Rows / observations")
+}
+
+```
+
+```{r getMode Function}
+
+getMode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+```
+
+
+```{r remove the columns that has more than 50% of the data missing}
+lendingClubDataReduced <-  lendingClubData[colMeans(is.na(lendingClubData)) <= 0.5]
+dim(lendingClubDataReduced)
+ggplot_missing(lendingClubDataReduced)
+```
+
+##### **5. c. Remove the unnecessary columns based on the row count **
+
+
+```{r Checking data types again}
+table(sapply(lendingClubDataReduced[1, ], class))
+
+numericColumns   <- names(lendingClubDataReduced) [sapply(lendingClubDataReduced[1, ], class) == "numeric"]
+integerColumns   <- names(lendingClubDataReduced) [sapply(lendingClubDataReduced[1, ], class) == "integer"]
+characterColumns <- names(lendingClubDataReduced) [sapply(lendingClubDataReduced[1, ], class) == "character"]
+dateColumns   <- names(lendingClubDataReduced) [sapply(lendingClubDataReduced[1, ], class) == "Date"]
+```
+
+
+```{r remove unnecessary CHARACTER columns}
+sapply(lendingClubDataReduced[, characterColumns], function(x) {length(unique(x))})
+
+lendingClubDataReduced <- lendingClubDataReduced %>% 
+                          dplyr::select( -c(emp_title, verification_status, pymnt_plan, url, desc, 
+                                            title, zip_code, application_type, initial_list_status))
+```
+
+
+```{r remove unnecessary Integer columns}
+sapply(lendingClubDataReduced[, integerColumns], function(x) {length(unique(x))})
+
+rownames(lendingClubDataReduced) <- lendingClubDataReduced$id
+
+lendingClubDataReduced <- lendingClubDataReduced %>%
+                           dplyr::select( -c(id, member_id, policy_code, -collections_12_mths_ex_med) )
+
+
+```
+
+
+```{r remove unnecessary Numeric columns}
+sapply(lendingClubDataReduced[, numericColumns], function(x) {length(unique(x))})
+
+```
+
+
+##### **5. d. Remove the unnecessary columns after looking at the data dictionary **
+
+The following features are not required since we are classifying the risk of default before the loan is funded.
+*Note, we will keep installment to see if the user defaults for the given installment. (I don't think this makes sense given the context we are approaching this from)
+
+* funded_amnt
+* funded_amnt_inv
+* installmet
+* int_rate
+* issue_d
+* out_prncp
+* out_prncp_inv
+* total_pymnt
+* total_pymnt_inv
+* total_rec_prncp
+* total_rec_int
+* total_rec_late_fee
+* recoveries
+* collection_recovery_fee
+* last_pymnt_amnt
+* last_credit_pull_d
+* last_pymnt_d
+* next_pymnt_d
+
+
+```{r Deleting information not known at the time of loan origination.}
+featureList  <- c('funded_amnt', 'funded_amnt_inv', 'int_rate', 'issue_d', 'out_prncp', 
+                  'out_prncp_inv', 'total_pymnt', 'total_pymnt_inv', 'total_rec_prncp',
+                  'total_rec_int', 'total_rec_late_fee', 'recoveries', 'collection_recovery_fee', 
+                  'last_pymnt_amnt', 'last_pymnt_d', 'installment') #Added by JB 12/4
+
+lendingClubDataReduced   <- lendingClubDataReduced %>% dplyr::select(-all_of(featureList))
+```
+
+```{r Remove Numeric Columns whose sum is 0}
+lendingClubDataReducedNumeric <- lendingClubDataReduced[,sapply(lendingClubDataReduced, class) %in% c('numeric','integer')]
+zeroSumColumns <- colnames(lendingClubDataReducedNumeric[,colSums(lendingClubDataReducedNumeric,na.rm = TRUE)==0])
+zeroSumColumns
+
+lendingClubDataReduced <- lendingClubDataReduced %>%
+                            dplyr::select(-all_of(zeroSumColumns))
+```
+
+```{r Checking data types}
+table(sapply(lendingClubDataReduced[1, ], class))
+
+numericColumns   <- names(lendingClubDataReduced) [sapply(lendingClubDataReduced[1, ], class) == "numeric"]
+integerColumns   <- names(lendingClubDataReduced) [sapply(lendingClubDataReduced[1, ], class) == "integer"]
+characterColumns <- names(lendingClubDataReduced) [sapply(lendingClubDataReduced[1, ], class) == "character"]
+dateColumns <- names(lendingClubDataReduced) [sapply(lendingClubDataReduced[1, ], class) == "Date"]
+
+```
+
+
+```{r look at number of remaining columns}
+numericColumns
+characterColumns
+integerColumns
+dateColumns
+```
+
+##### **5. e. Variable Cleanup **
+
+```{r Looking at individual features}
+lendingClubDataReduced %>% group_by(term) %>%  summarise(Count = n())
+lendingClubDataReduced %>% group_by(grade) %>%  summarise(Count = n())
+lendingClubDataReduced %>% group_by(sub_grade) %>%  summarise(Count = n())
+lendingClubDataReduced %>% group_by(emp_length) %>%  summarise(Count = n())
+lendingClubDataReduced %>% group_by(home_ownership) %>%  summarise(Count = n())
+lendingClubDataReduced %>% group_by(loan_status) %>%  summarise(Count = n())
+lendingClubDataReduced %>% group_by(purpose) %>%  summarise(Count = n())
+lendingClubDataReduced %>% group_by(addr_state) %>%  summarise(Count = n())
+lendingClubDataReduced %>% group_by(earliest_cr_line) %>%  summarise(Count = n())
+lendingClubDataReduced %>% group_by(revol_util) %>%  summarise(Count = n())
+lendingClubDataReduced %>% group_by(IsLoanMeetsPolicy) %>%  summarise(Count = n())
+```
+
+
+##### **5. f. Datatype Formatting & Conversion **
+
+
+1. Format:
+*  loan_status
+*  revol_util
+*  emp_length
+
+```{r Character Variable Formatting & Conversion}
+
+lendingClubDataCleaned  <- 
+lendingClubDataReduced %>% 
+  mutate(loan_status = str_replace(loan_status, "Does not meet the credit policy. Status:", "")) %>% 
+  mutate(emp_length = str_replace_all(emp_length,  c('< 1 year' = '0 years' , '10\\+ years' = '10 years', 
+  "n/a" = NA, "years" = "", "year" = "")) ) %>%
+  mutate_at("emp_length", as.numeric)
+
+```
+
+Note: To be Revisited. We will look at the variable importance and make the decision to filter out data.
+      For now imputing the data.
+
+* Can we remove/impute rows with is.na(emp_length)
+* Can we remove/impute rows with is.na(revol_util)
+
+
+```{r }
+table(sapply(lendingClubDataCleaned[1, ], class))
+
+numericColumns   <- names(lendingClubDataCleaned) [sapply(lendingClubDataCleaned[1, ], class) == "numeric"]
+integerColumns   <- names(lendingClubDataReduced) [sapply(lendingClubDataReduced[1, ], class) == "integer"]
+characterColumns <- names(lendingClubDataCleaned) [sapply(lendingClubDataCleaned[1, ], class) == "character"]
+dateColumns <- names(lendingClubDataCleaned) [sapply(lendingClubDataCleaned[1, ], class) == "Date"]
+
+```
+
+##### **5. g. Numeric Features Imputation **
+
+```{r Look For NAs in Numeric Columns}
+sapply(X = lendingClubDataCleaned[,c(numericColumns,integerColumns)], FUN = function(x) sum(is.na(x)))
+
+```
+```{r % of Missing Values}
+missingValueColumns <- data.frame(sapply(lendingClubDataCleaned, function(x){ sum(is.na(x))*100./nrow(lendingClubData) }))
+missingValueColumns <- cbind(variable = row.names(missingValueColumns), missingValueColumns)
+
+names(missingValueColumns) <- c("MissingValueColumn", "MissingValuePercent")
+missingValueColumns %>% 
+  dplyr::filter(MissingValuePercent != 0) %>% 
+  arrange(desc(MissingValuePercent))
+```
+
+Note: To be Revisited. We will look at the variable importance and make the decision to filter out data.
+      For now defaulting(Imputing) them to 0.
+
+
+For the following columns NA might indicate that the data entry operator might have inputted nothing or there is not value to be entered for the applicant.
+
+* pub_rec_bankruptcies has only 3 values {0, 1, 2} with most of the values 0.
+* tax_liens has only 2 values {0, 1} with most of the values 0.
+* delinq_2yrs.
+* inq_last_6mths
+* pub_rec
+* acc_now_delinq has only 2 values {0, 1} with most of the values 0.
+* delinq_amnt
+
+Therefore replacing NA with 0
+
+Come back and see how MARS performs without imputation!
+
+```{r Data Imputation: Replacing NA with 0}
+lendingClubDataImputed <- lendingClubDataCleaned %>% 
+                            mutate(pub_rec_bankruptcies = if_else(is.na(pub_rec_bankruptcies), 0L, pub_rec_bankruptcies)) %>%
+                            mutate(tax_liens = if_else(is.na(tax_liens), 0L, tax_liens)) %>%
+                            mutate(delinq_2yrs = if_else(is.na(delinq_2yrs), 0L, delinq_2yrs)) %>%
+                            mutate(inq_last_6mths = if_else(is.na(inq_last_6mths), 0L, inq_last_6mths)) %>%
+                            mutate(pub_rec = if_else(is.na(pub_rec), 0L, pub_rec)) %>%
+                            mutate(acc_now_delinq = if_else(is.na(acc_now_delinq), 0L, acc_now_delinq)) %>%
+                            mutate(delinq_amnt = if_else(is.na(delinq_amnt), 0L, acc_now_delinq))
+```
+
+Performing the mean/medain/mode/quantile imputation for the following columns:
+
+* emp_length
+* revol_util
+* open_acc
+* total_acc
+* annual_inc
+
+```{r Data Imputation: emp_length - First Quantile Imputation) }
+
+summary(lendingClubDataImputed$emp_length)
+quantile(lendingClubDataImputed$emp_length, na.rm = TRUE)
+
+boxplot(lendingClubDataImputed$emp_length)
+plot(density(lendingClubDataImputed$emp_length[!is.na(lendingClubDataImputed$emp_length)], bw = "nrd"))
+
+
+lendingClubDataImputed <- lendingClubDataImputed %>%
+                            mutate(emp_length = if_else(is.na(emp_length), quantile(emp_length, na.rm = TRUE)[2] , emp_length))
+
+points(density(lendingClubDataImputed$emp_length[!is.na(lendingClubDataImputed$emp_length)], bw = "nrd"), type = "l", col = "maroon")
+
+```
+
+```{r Data Imputation: revol_util - Mean Imputation) }
+
+summary(lendingClubDataImputed$revol_util)
+quantile(lendingClubDataImputed$revol_util, na.rm = TRUE)
+
+boxplot(lendingClubDataImputed$revol_util)
+plot(density(lendingClubDataImputed$revol_util[!is.na(lendingClubDataImputed$revol_util)], bw = "nrd"))
+
+
+lendingClubDataImputed <- lendingClubDataImputed %>%
+                           mutate(revol_util = if_else(is.na(revol_util), mean(revol_util, na.rm = TRUE) , revol_util))
+
+points(density(lendingClubDataImputed$revol_util[!is.na(lendingClubDataImputed$revol_util)], bw = "nrd"), type = "l", col = "maroon")
+
+```
+
+```{r Data Imputation: open_acc - Median Imputation) }
+
+summary(lendingClubDataImputed$open_acc)
+quantile(lendingClubDataImputed$open_acc, na.rm = TRUE)
+
+boxplot(lendingClubDataImputed$open_acc)
+plot(density(lendingClubDataImputed$open_acc[!is.na(lendingClubDataImputed$open_acc)], bw = "nrd"))
+
+
+lendingClubDataImputed <- lendingClubDataImputed %>%
+                           mutate(open_acc = if_else(is.na(open_acc), as.integer(median(open_acc, na.rm = TRUE)), open_acc))
+
+points(density(lendingClubDataImputed$open_acc[!is.na(lendingClubDataImputed$open_acc)], bw = "nrd"), type = "l", col = "maroon")
+
+```
+```{r Data Imputation: total_acc - median Imputation) }
+
+summary(lendingClubDataImputed$total_acc)
+quantile(lendingClubDataImputed$total_acc, na.rm = TRUE)
+
+boxplot(lendingClubDataImputed$total_acc)
+plot(density(lendingClubDataImputed$total_acc[!is.na(lendingClubDataImputed$total_acc)], bw = "nrd"))
+
+
+lendingClubDataImputed <- lendingClubDataImputed %>%
+                           mutate(total_acc = if_else(is.na(total_acc), as.integer(median(total_acc, na.rm = TRUE)), total_acc))
+
+points(density(lendingClubDataImputed$total_acc[!is.na(lendingClubDataImputed$total_acc)], bw = "nrd"), type = "l", col = "maroon")
+
+```
+
+```{r Data Imputation: annual_inc - Median Imputation) }
+
+summary(lendingClubDataImputed$annual_inc)
+quantile(lendingClubDataImputed$annual_inc, na.rm = TRUE)
+
+boxplot(lendingClubDataImputed$annual_inc)
+plot(density(lendingClubDataImputed$annual_inc[!is.na(lendingClubDataImputed$annual_inc)], bw = "nrd"))
+
+
+lendingClubDataImputed <- lendingClubDataImputed %>%
+                           mutate(annual_inc = if_else(is.na(annual_inc), median(annual_inc, na.rm = TRUE) , annual_inc))
+
+points(density(lendingClubDataImputed$annual_inc[!is.na(lendingClubDataImputed$annual_inc)], bw = "nrd"), type = "l", col = "maroon")
+
+```
+
+```{r Mode Imputing the Date Colulmns}
+lendingClubDataImputed <- lendingClubDataImputed %>% 
+                            mutate(earliest_cr_line   = if_else(is.na(earliest_cr_line), getMode(earliest_cr_line), earliest_cr_line))  %>% 
+                            mutate(last_credit_pull_d = if_else(is.na(last_credit_pull_d), getMode(last_credit_pull_d), last_credit_pull_d))
+```
+
+
+```{r Looking at missing values once again}
+dim(lendingClubDataImputed)
+anyNA(lendingClubDataImputed)
+```
+
+
+##### **6. Univariate Analysis **
+
+##### **6. a. Looking at feature that have low SD **
+
+```{r Summary Statistics}
+skim(lendingClubDataImputed)
+```
+
+```{r Looking at variables that have low SD}
+lendingClubDataImputed %>% group_by(delinq_2yrs) %>% summarise(Count = n())
+lendingClubDataImputed %>% group_by(pub_rec) %>% summarise(Count = n())
+lendingClubDataImputed %>% group_by(acc_now_delinq) %>% summarise(Count = n())
+lendingClubDataImputed %>% group_by(delinq_amnt) %>% summarise(Count = n())
+lendingClubDataImputed %>% group_by(pub_rec_bankruptcies) %>% summarise(Count = n())
+lendingClubDataImputed %>% group_by(tax_liens) %>% summarise(Count = n())
+```
+Further below, we are going to remove the features that do not add value to the supervisor.
+
+##### **6. b. Looking at relationship between feature and supervisor and also the features that have low SD **
+
+Filtering the data so that we have only "Charged Off" and "Fully Paid" loan statuses.
+The rest of the loan statuses does not help in classification.
+
+```{r lendingClubDataImputed}
+lendingClubDataFiltered <- lendingClubDataImputed %>% dplyr::filter(loan_status %in% c("Charged Off", "Fully Paid"))
+names(lendingClubDataFiltered)
+attach(lendingClubDataFiltered)
+```
+
+
+##### **7.Variability Check **
+
+```{r Variability Check preProcess Method}
+
+#nzv methods removes the columns with minor non - zero variability
+
+lendingClubDataFiltered %>%
+  preProcess(method = 'nzv') %>%
+  predict(newdata = lendingClubDataFiltered)
+
+#we found variables identified above with variability check, don't need to look at variables
+#From the above Results, we can remove the following columns:
+#* acc_now_delinq
+#* delinq_amnt
+#* tax_liens
+nearZeroVarRes <- nearZeroVar(lendingClubDataFiltered, saveMetrics = TRUE)
+nearZeroVarRes[nearZeroVarRes$zeroVar == TRUE | nearZeroVarRes$nzv == TRUE, ]
+
+lendingClubDataFiltered <- 
+lendingClubDataFiltered %>%
+  preProcess(method = 'nzv') %>%
+  predict(newdata = lendingClubDataFiltered)
+
+```
+##### **8. Correlation Filtering **
+
+```{r Correlation Plot}
+quantitativeColumns   <- names(lendingClubDataFiltered) [
+                                                            sapply(lendingClubDataFiltered[1, ], class) == "numeric" | 
+                                                            sapply(lendingClubDataFiltered[1, ], class) == "integer"
+                                                        ]
+
+corrleation           <- cor(lendingClubDataFiltered[, quantitativeColumns], use="pairwise.complete.obs", method="pearson")
+corrplot(corrleation, method='number', type = 'upper', tl.cex=.5, number.cex=0.5)
+``` 
+
+```{r Correlation Filtering}
+highlyCorrelatedFeature <- findCorrelation(corrleation, 0.80, names = TRUE)
+highlyCorrelatedFeature
+
+lendingClubDataFilteredWithoutCor  <- lendingClubDataFiltered %>%
+                                        dplyr::select(-highlyCorrelatedFeature)
+dim(lendingClubDataFilteredWithoutCor)
+```
+
+```{r loan_amnt statistics}
+hist(loan_amnt)
+boxplot(loan_amnt ~ loan_status, col = "orange")
+
+lendingClubDataFiltered %>% 
+  group_by(loan_status) %>%
+  summarise(
+                Count = n(), mean = mean(loan_amnt), median = median(loan_amnt), stdDeviation = sd(loan_amnt), min = quantile(loan_amnt)[1]
+              , "25%" = quantile(loan_amnt)[2], "50%" = quantile(loan_amnt)[3], "75%" = quantile(loan_amnt)[4], max =  quantile(loan_amnt)[5] 
+           )
+```
+
+
+```{r loan_amnt term}
+hist(term)
+
+lendingClubDataFiltered %>% 
+  group_by(term, loan_status) %>%
+  summarise( Count = n() ) %>% 
+  mutate(percentage = Count/sum(Count)) %>% 
+  dplyr::filter(loan_status == "Charged Off")
+```
+
+```{r sub_grade}
+
+  lendingClubDataFiltered %>% 
+    group_by(sub_grade, loan_status) %>%
+    summarise( Count = n() ) %>% 
+    mutate(percentage = Count/sum(Count)) %>% 
+    dplyr::filter(loan_status == "Charged Off") %>% 
+    ggplot(aes(x= sub_grade ,y = percentage, group = 1) ) +
+    geom_line(col ='red')
+```
+
+```{r emp_length}
+
+  lendingClubDataFiltered %>% 
+    group_by(emp_length, loan_status) %>%
+    summarise( Count = n() ) %>% 
+    mutate(percentage = Count/sum(Count)) %>% 
+    dplyr::filter(loan_status == "Charged Off") %>% 
+    ggplot(aes(x= emp_length ,y = percentage, group = 1) ) +
+    geom_line(col ='red') + ylim(0, 0.25)
+```
+
+```{r home_ownership}
+
+  lendingClubDataFiltered %>% 
+    group_by(home_ownership, loan_status) %>%
+    summarise( Count = n() ) %>% 
+    mutate(percentage = Count/sum(Count)) %>% 
+    dplyr::filter(loan_status == "Charged Off") #%>% 
+    #ggplot(aes(x= home_ownership ,y = percentage, group = 1) ) +
+    #geom_line(col ='red') + ylim(0, 0.25)
+```
+
+
+```{r annual_inc statistics}
+hist(log(annual_inc))
+boxplot(log(annual_inc) ~ loan_status, col = "orange")
+
+lendingClubDataFiltered %>% 
+  group_by(loan_status) %>%
+  summarise(
+                Count = n(), mean = mean(log(annual_inc)), median = median(log(annual_inc)), stdDeviation = sd(log(annual_inc))
+               , min = quantile(log(annual_inc))[1], "25%" = quantile(log(annual_inc))[2], "50%" = quantile(log(annual_inc))[3]
+               , "75%" = quantile(log(annual_inc))[4], max =  quantile(log(annual_inc))[5]
+           )
+```
+
+```{r purpose}
+
+  lendingClubDataFiltered %>% 
+    group_by(purpose, loan_status) %>%
+    summarise( Count = n() ) %>% 
+    mutate(percentage = Count/sum(Count)) %>% 
+    dplyr::filter(loan_status == "Charged Off") %>% 
+    arrange(desc(percentage))#%>% 
+    #ggplot(aes(x= home_ownership ,y = percentage, group = 1) ) +
+    #geom_line(col ='red') + ylim(0, 0.25)
+```
+
+```{r addr_state}
+
+  lendingClubDataFiltered %>% 
+    group_by(addr_state, loan_status) %>%
+    summarise( Count = n() ) %>% 
+    mutate(percentage = Count/sum(Count)) %>% 
+    dplyr::filter(loan_status == "Charged Off") %>% 
+    arrange(desc(percentage))#%>% 
+    #ggplot(aes(x= home_ownership ,y = percentage, group = 1) ) +
+    #geom_line(col ='red') + ylim(0, 0.25)
+```
+
+
+```{r dti statistics}
+hist(dti)
+boxplot(dti ~ loan_status, col = "orange")
+
+lendingClubDataFiltered %>% 
+  group_by(loan_status) %>%
+  summarise(
+                Count = n(), mean = mean(dti), median = median(dti), stdDeviation = sd(dti)
+               , min = quantile(dti)[1], "25%" = quantile(dti)[2], "50%" = quantile(dti)[3]
+               , "75%" = quantile(dti)[4], max =  quantile(dti)[5]
+           )
+```
+
+```{r delinq_2yrs}
+
+  lendingClubDataFiltered %>% 
+    group_by(delinq_2yrs, loan_status) %>%
+    summarise( Count = n() ) %>% 
+    mutate(percentage = Count/sum(Count)) %>% 
+    dplyr::filter(loan_status == "Charged Off") %>% 
+    arrange(desc(percentage))#%>% 
+    #ggplot(aes(x= home_ownership ,y = percentage, group = 1) ) +
+    #geom_line(col ='red') + ylim(0, 0.25)
+```
+ 
+```{r inq_last_6mths}
+
+  lendingClubDataFiltered %>% 
+    group_by(inq_last_6mths, loan_status) %>%
+    summarise( Count = n() ) %>% 
+    mutate(percentage = Count/sum(Count)) %>% 
+    dplyr::filter(loan_status == "Charged Off") %>% 
+    arrange(desc(percentage))#%>% 
+    #ggplot(aes(x= home_ownership ,y = percentage, group = 1) ) +
+    #geom_line(col ='red') + ylim(0, 0.25)
+```
+
+
+```{r open_acc statistics}
+hist(open_acc)
+boxplot(open_acc ~ loan_status, col = "orange")
+
+lendingClubDataFiltered %>% 
+  group_by(loan_status) %>%
+  summarise(
+                Count = n(), mean = mean(open_acc), median = median(open_acc), stdDeviation = sd(open_acc)
+               , min = quantile(open_acc)[1], "25%" = quantile(open_acc)[2], "50%" = quantile(open_acc)[3]
+               , "75%" = quantile(open_acc)[4], max =  quantile(open_acc)[5]
+           )
+```
+
+```{r pub_rec}
+lendingClubDataImputed %>% 
+  dplyr::filter(pub_rec != 0) %>% 
+  select(loan_amnt, term, grade, sub_grade, emp_length, home_ownership, annual_inc, loan_status, pub_rec, pub_rec_bankruptcies) %>%
+  arrange(loan_status) %>%
+  group_by(pub_rec, loan_status) %>%
+  summarise(count = n()) %>%
+  dplyr::filter(loan_status %in% c("Charged Off", "Fully Paid"))
+
+  lendingClubDataFiltered %>% 
+    group_by(pub_rec, loan_status) %>%
+    summarise( Count = n() ) %>% 
+    mutate(percentage = Count/sum(Count)) %>% 
+    dplyr::filter(loan_status == "Charged Off") %>% 
+    arrange(desc(percentage))#%>% 
+    #ggplot(aes(x= home_ownership ,y = percentage, group = 1) ) +
+    #geom_line(col ='red') + ylim(0, 0.25)
+  
+```
+
+
+```{r revol_bal statistics}
+hist(revol_bal)
+boxplot(log(revol_bal) ~ loan_status, col = "orange")
+
+lendingClubDataFiltered %>% 
+  group_by(loan_status) %>%
+  summarise(
+                Count = n(), mean = mean(log(revol_bal + 1)), median = median(log(revol_bal  + 1)), stdDeviation = sd(log(revol_bal + 1))
+               , min = quantile(log(revol_bal + 1))[1], "25%" = quantile(log(revol_bal + 1))[2], "50%" = quantile(log(revol_bal + 1))[3]
+               , "75%" = quantile(log(revol_bal + 1))[4], max =  quantile(log(revol_bal + 1))[5]
+           )
+```
+
+
+```{r revol_util statistics}
+hist(revol_util)
+boxplot(revol_util ~ loan_status, col = "orange")
+
+lendingClubDataFiltered %>% 
+  group_by(loan_status) %>%
+  summarise(
+                Count = n(), mean = mean(revol_util), median = median(revol_util), stdDeviation = sd(revol_util)
+               , min = quantile(revol_util)[1], "25%" = quantile(revol_util)[2], "50%" = quantile(revol_util)[3]
+               , "75%" = quantile(revol_util)[4], max =  quantile(revol_util)[5]
+           )
+```
+
+
+```{r total_acc statistics}
+hist(total_acc)
+boxplot(total_acc ~ loan_status, col = "orange")
+
+lendingClubDataFiltered %>% 
+  group_by(loan_status) %>%
+  summarise(
+                Count = n(), mean = mean(total_acc), median = median(total_acc), stdDeviation = sd(total_acc)
+               , min = quantile(total_acc)[1], "25%" = quantile(total_acc)[2], "50%" = quantile(total_acc)[3]
+               , "75%" = quantile(total_acc)[4], max =  quantile(total_acc)[5]
+           )
+```
+
+```{r acc_now_delinq}
+lendingClubDataImputed %>% 
+  dplyr::filter(acc_now_delinq != 0) %>% 
+  select(loan_amnt, term, grade, sub_grade, emp_length, home_ownership, loan_status, acc_now_delinq, pub_rec, pub_rec_bankruptcies) %>%
+  arrange(loan_status) %>%
+  group_by(acc_now_delinq, loan_status) %>%
+  summarise(count = n()) %>%
+  dplyr::filter(loan_status %in% c("Charged Off", "Fully Paid"))
+
+```
+```{r delinq_amnt}
+lendingClubDataImputed %>% 
+  dplyr::filter(delinq_amnt != 0) %>% 
+  select(loan_amnt, term, grade, sub_grade, emp_length, home_ownership, loan_status, delinq_amnt, pub_rec, pub_rec_bankruptcies) %>%
+  arrange(loan_status) %>%
+  group_by(delinq_amnt, loan_status) %>%
+  summarise(count = n()) %>%
+  dplyr::filter(loan_status %in% c("Charged Off", "Fully Paid"))
+```
+
+
+```{r pub_rec_bankruptcies}
+lendingClubDataImputed %>% 
+  dplyr::filter(pub_rec_bankruptcies != 0) %>% 
+  #select(loan_amnt, term, grade, sub_grade, emp_length, home_ownership, loan_status, delinq_amnt, pub_rec, pub_rec_bankruptcies) %>%
+  arrange(pub_rec_bankruptcies) %>%
+  group_by(pub_rec_bankruptcies, loan_status) %>%
+  summarise(count = n()) %>%
+  dplyr::filter(loan_status %in% c("Charged Off", "Fully Paid"))
+  
+```
+
+
+```{r earliest_cr_line}
+lendingClubDataImputed %>% 
+  select(loan_amnt, term, grade, sub_grade, emp_length, home_ownership, loan_status, earliest_cr_line, pub_rec, pub_rec_bankruptcies) %>%
+  group_by(as.numeric(format(earliest_cr_line,'%Y')), loan_status) %>%
+  summarise(count = n()) %>%
+  dplyr::filter(loan_status %in% c("Charged Off")) %>%
+  arrange(desc(count))#%>% 
+```
+
+```{r last_credit_pull_d}
+lendingClubDataImputed %>% 
+  select(loan_amnt, term, grade, sub_grade, emp_length, home_ownership, loan_status, last_credit_pull_d, pub_rec, pub_rec_bankruptcies) %>%
+  group_by(as.numeric(format(last_credit_pull_d,'%Y')), loan_status) %>%
+  summarise(count = n()) %>%
+  dplyr::filter(loan_status %in% c("Charged Off")) %>%
+  arrange(desc(count))#%>% 
+```
+
+```{r tax_liens}
+lendingClubDataImputed %>% 
+  dplyr::filter(tax_liens != 0) %>% 
+  select(loan_amnt, term, grade, sub_grade, emp_length, home_ownership, loan_status, tax_liens, pub_rec, pub_rec_bankruptcies) %>%
+  arrange(tax_liens) %>%
+  group_by(tax_liens, loan_status) %>%
+  summarise(count = n()) %>%
+  dplyr::filter(loan_status %in% c("Charged Off", "Fully Paid"))
+```
+
+
+```{r detach lendingClubDataFiltered}
+detach(lendingClubDataFiltered)
+```
+
+### Based on the Bivariate analysis above:
+
+* Charged Off Loans are associated with higher mean Loan Amount.
+* 60-month-term loans are twice likely to be Charged Off compared to 36-month-term loan.
+* Charged Off Loans are associated with higher mean Installment Amount.
+* There is higher probability of charge off as the sub_grade goes from A to G
+* Renters and homeowners have a higher probability of charge-off.
+* Charged Off Loans are associated with lower mean Annual Income.
+* Small Businesses(Purpose) seem to have a higher charge off probability for loans.
+* Charged Off Loans are associated with higher mean dti.
+* Charged Off Loans are associated with higher number of deliquent account in past two years.
+* Charged Off Loans are associated with higher number of inquires in past 6 months.
+* Charged Off Loans are associated with higher number of inquires in past 6 months.
+* Charged Off Loans are associated with higher number of public records.
+* Charged Off Loans are associated with higher revolving balance utilization (revol_util).
+* Borrowers who are charged-off tend to have shorter lines of credit.
+* Borrowers who are charged-off tend to have the credit pulled recently.
+
+* Decided to drop addr_state as it might bias the results in favor of some states.
+* Probability of charge off is almost same across all the employments lengths.
+* There is no significant relationship between open_acc and Charge Off rates.
+* There is no significant relationship between revol_bal and Charge Off rates.
+* There is no significant relationship between total_acc and Charge Off rates.
+* acc_now_delinq, delinq_amnt, tax_liens are removed since there are no significant accounts with the data.
+* pub_rec_bankruptcies is correlated with  number of public records. Removed this feature since it has near zero variance.
+
+
+```{r looking at final features}
+lendingClubDataFilteredWithoutCor <- lendingClubDataFilteredWithoutCor %>%
+                                       select(-addr_state, -grade, -emp_length)
+names(lendingClubDataFilteredWithoutCor)
+
+```
+
+##### **9. Supervisor proportions **
+
+```{r Supervisor Proportions/Balance}
+
+#Not a rare outcome
+  lendingClubDataFiltered %>% 
+    group_by(loan_status) %>%
+    summarise( Count = n() ) %>% 
+    mutate(percentage = Count/sum(Count) * 100)
+    
+```
+
+##### **5. e. Training Testing split **
+
+```{r dummy}
+lendingClubDataFilteredWithoutCor$default <- ifelse(lendingClubDataFilteredWithoutCor$loan_status=='Charged Off','X1','X0')
+lendingClubDataFilteredWithoutCor <- lendingClubDataFilteredWithoutCor %>%
+                                       select(-loan_status)
+
+lendingClubDataFilteredWithoutCor[,sapply(lendingClubDataFilteredWithoutCor, class) == 'character'] <- lapply(lendingClubDataFilteredWithoutCor[,sapply(lendingClubDataFilteredWithoutCor, class) == 'character'] , factor)
+# lendingClubDataFilteredWithoutCor$default <- relevel(lendingClubDataFilteredWithoutCor$default, ref = 'X1')
+```
+
+```{r split}
+set.seed(1)
+n          = nrow(lendingClubDataFilteredWithoutCor)
+trainIndex = createDataPartition(lendingClubDataFilteredWithoutCor$default, p = .8, list = FALSE) %>% as.vector(.)
+testIndex  = (1:n)[-trainIndex]
+
+role            = rep('train',n)
+role[testIndex] = 'test'
+```
+ 
+### Training data
+
+```{r training}
+training = lendingClubDataFilteredWithoutCor[trainIndex,]
+testing = lendingClubDataFilteredWithoutCor[-trainIndex,]
+Ytrain = training$default
+Ytest = testing$default
+Xtrain = training %>% select(-default)
+Xtest = testing %>% select(-default)
+
+Ytrain = relevel(Ytrain, ref = 'X1')
+Ytest = relevel(Ytest, ref = 'X1')
+
+```
+
+
+##### **5. f. Remove Skewness via. transformations **
+
+```{r skewness}
+skewnessVec = Xtrain[,sapply(Xtrain, class) %in% c('numeric','integer')] %>%
+  sapply(., e1071::skewness)
+names(Xtrain[,sapply(Xtrain, class) %in% c('numeric','integer')])[abs(skewnessVec)> 2] #no variables
+
+```
+```{r transform}
+hist(log(Xtrain$annual_inc+1))
+hist(log(Xtrain$revol_bal+1))
+
+poisson <- c("delinq_2yrs","inq_last_6mths","pub_rec")
+
+Xtrain$annual_inc <- log(Xtrain$annual_inc+1)
+Xtest$annual_inc <- log(Xtest$annual_inc+1)
+Xtrain$revol_bal <- log(Xtrain$revol_bal+1)
+Xtest$revol_bal <- log(Xtest$revol_bal+1)
+```
+
+```{r center and scale}
+#Standardize/Scale
+Xtrain[,sapply(Xtrain, class) %in% c('numeric','integer') & !(names(Xtrain) %in% poisson)] <- 
+Xtrain[,sapply(Xtrain, class) %in% c('numeric','integer') & !(names(Xtrain) %in% poisson)] %>% 
+  preProcess(method = c('center', 'scale')) %>%
+  predict(newdata = Xtrain[,sapply(Xtrain, class) %in% c('numeric','integer') & !(names(Xtrain) %in% poisson)])
+
+Xtest[,sapply(Xtest, class) %in% c('numeric','integer') & !(names(Xtest) %in% poisson)] <- 
+Xtest[,sapply(Xtest, class) %in% c('numeric','integer') & !(names(Xtest) %in% poisson)] %>% 
+  preProcess(method = c('center', 'scale')) %>%
+  predict(newdata = Xtest[,sapply(Xtest, class) %in% c('numeric','integer') & !(names(Xtest) %in% poisson)])
+```
+
+
+##### **10. MARS **
+
+
+```{r grid}
+tuneGrid = expand.grid(degree = 1:3, 
+                       #nprune = c(10,15,20,25,30,40,50))
+                       nprune = seq(from=2,to=20,by=2))
+```
+```{r gridSearch, cache = TRUE, include = FALSE}
+set.seed(123)
+number = 5
+# cross validated model
+marsTune = train(
+  x = Xtrain,
+  y = Ytrain,
+  method = "earth",
+  #metric = "ROC",
+  metric  = "Sens",
+  trControl = trainControl(method = "cv", number = number, classProbs = TRUE, summaryFunction = twoClassSummary),
+  tuneGrid = tuneGrid
+)
+```
+
+
+```{r gridSearchResults}
+marsTune$bestTune
+#marsTune$results
+
+# plot results
+ggplot(marsTune)
+```
+```{r}
+MARSvip = vip(marsTune, num_features = 40, bar = FALSE, value = "gcv") + ggtitle("GCV")
+
+plot(MARSvip)
+```  
+
+
+
+
+```{r coefficients}
+head(coef(marsTune$finalModel))
+```
+
+# Predictions on the test set
+
+Remember that when you see the word 'posterior' when looking at a classification method, you should think 'probability estimate'
+
+```{r }
+probHatTest = predict(marsTune$finalModel, Xtest, type = 'response')
+YhatTest   = ifelse(probHatTest > 0.5, "X0", "X1")
+```
+
+The confusion matrices
+```{r}
+confusion <- table(YhatTest, Ytest)[2:1,]
+confusion
+sensitivity = confusion[1]/(confusion[1]+confusion[2])
+specificity = confusion[4]/(confusion[4]+confusion[3])
+precision = confusion[1]/(confusion[1]+confusion[3])
+
+c(sensitivity,specificity,precision)
+```
+
