@@ -1336,19 +1336,25 @@ names(lendingClubDataFilteredWithoutCor)
 #### **6. PCA to identify the most significant features **
 
 #### Logistic regression
-YtrainRelevel = relevel(Ytrain, ref = 'Fully Paid')
-YtestRelevel  = relevel(Ytest, ref = 'Fully Paid')
+
+```{r logistic regression}
+
+YtrainRelevel = relevel(Ytrain, ref = 'Charged Off')
+YtestRelevel  = relevel(Ytest, ref = 'Charged Off')
 trControl     = trainControl(method = 'none')
 outLogistic   = train(x = XtrainFull, y = YtrainRelevel,
                       method = 'glm', trControl = trControl)
 
+```
 ```{r predictions}
 YhatTestProbLR = predict(outLogistic, XtestFull, type = 'prob')
 head(YhatTestProbLR)
-calibProbs = calibration(YtestRelevel ~ YhatTestProbLR$'Fully Paid', cuts = 5)
+calibProbs = calibration(YtestRelevel ~ YhatTestProbLR$'Charged Off', cuts = 5)
 xyplot(calibProbs)
+
 ```
 ```{r confusion matrix}
+
 YhatTestLR = predict(outLogistic, XtestFull, type = 'raw')
 confusionMatrixOutLR = confusionMatrix(reference = YtestRelevel, data = YhatTestLR)
 print(confusionMatrixOutLR$table)
@@ -1358,34 +1364,33 @@ rocCurveLR = roc(Ytest, YhatTestProbLR$'Charged Off')
 plot(rocCurveLR, legacy.axes=TRUE)
 rocCurveLR$auc
 ```
-
 ```{r variable importance}
 varImp(outLogistic)
 ```
 
 ```{r LDA}
-YtrainRelevel = relevel(Ytrain, ref = 'Fully Paid')
-YtestRelevel  = relevel(Ytest, ref = 'Fully Paid')
+
+YtrainRelevel = relevel(Ytrain, ref = 'Charged Off')
+YtestRelevel  = relevel(Ytest, ref = 'Charged Off')
 trControl     = trainControl(method = 'none')
-outLDA        = train(x = XtrainFull, y = YtrainRelevel,
+outLDA        = train(x = XtrainFull, y = Ytrain,
                       method = 'lda', trControl = trControl)
 
 YhatTestProbLDA = predict(outLDA, XtestFull, type = 'prob')
 head(YhatTestProbLDA)
 
-calibProbs = calibration(YtestRelevel ~ YhatTestProbLDA$'Fully Paid', cuts = 5)
-xyplot(calibProbs)
-
-calibProbs = calibration(YtestRelevel ~ YhatTestProbLDA$'Fully Paid', cuts = 5)
+calibProbs = calibration(YtestRelevel ~ YhatTestProbLDA$'Charged Off', cuts = 5)
 xyplot(calibProbs)
 ```
-```{r confusion matrix}
+```{r}
 YhatTestLDA = predict(outLDA, XtestFull, type = 'raw')
+confusionMatrixOutLDA = confusionMatrix(data=YhatTestLR, reference = YtestRelevel)
 confusionMatrixOutLDA = confusionMatrix(reference = YtestRelevel, data = YhatTestLDA)
 print(confusionMatrixOutLDA$table)
 print(confusionMatrixOutLDA$overall[1:2])
 print(confusionMatrixOutLDA$byClass[1:2])
-rocCurveLDA = roc(Ytest, YhatTestProbLDA$'Fully Paid')
+rocCurveLDA = roc(Ytest, YhatTestProbLDA$'Charged Off')
 plot(rocCurveLDA, legacy.axes=TRUE)
 rocCurveLDA$auc
 ```
+
